@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -12,8 +13,51 @@ import (
 
 const defaultRootFolderName = "ggnetwork"
 
-func CASPathTransformFunc(key string) PathKey {
-	hash := sha1.Sum([]byte(key))
+// PathKey represents a structured path for stored files.
+type PathKey struct {
+	PathName string
+	Filename string
+}
+
+// PathTransformFunc defines a function type for transforming keys into PathKeys.
+type PathTransformFunc func(string) PathKey
+
+// StoreOpts holds options for configuring a Store.
+type StoreOpts struct {
+	Root              string // Root is the folder name of the root, containing all the folders/files of the system
+	PathTransformFunc PathTransformFunc
+}
+
+// DefaultPathTransformFunc provides a default path transformation function
+var DefaultPathTransformFunc = func(key string) PathKey {
+	return PathKey{
+		PathName: key,
+		Filename: key,
+	}
+}
+
+// Store represents the file storage system.
+type Store struct {
+	StoreOpts
+}
+
+// NewStore initializes a new Store with the given options.
+func NewStore(opts StoreOpts) *Store {
+	if opts.PathTransformFunc == nil {
+		opts.PathTransformFunc = DefaultPathTransformFunc
+	}
+	if len(opts.Root) == 0 {
+		opts.Root = defaultRootFolderName
+	}
+
+	return &Store{
+		StoreOpts: opts,
+	}
+}
+
+// CASPathTransformFunc generates a PathKey using a content-addressable storage (CAS) approach.
+func CASPathTransformFunc(fileKey string) PathKey {
+	hash := sha1.Sum([]byte(fileKey))
 	hashStr := hex.EncodeToString(hash[:])
 
 	blocksize := 5
@@ -31,134 +75,128 @@ func CASPathTransformFunc(key string) PathKey {
 	}
 }
 
-type PathTransformFunc func(string) PathKey
-
-type PathKey struct {
-	PathName string
-	Filename string
-}
-
+// FirstPathName returns the first directory in the path.
 func (p PathKey) FirstPathName() string {
-	// Use filepath.Split to get the first directory
 	firstDir := filepath.Dir(p.PathName)
-	if firstDir == "." { // Handle cases where the path is empty or just a filename
+	if firstDir == "." {
 		return ""
 	}
 	// Extract the first directory name
 	return filepath.Base(firstDir)
 }
 
+// FullPath returns the full path including the filename.
 func (p PathKey) FullPath() string {
 	return filepath.Join(p.PathName, p.Filename)
 }
 
-// Root is the folder name of the root, containing all the folders/files of the system
-type StoreOpts struct {
-	Root              string
-	PathTransformFunc PathTransformFunc
-}
+// FileExists checks if a file exists at the specified path.
+func (s *Store) FileExists(fileID string, fileKey string) bool {
+	contentAddressPath := s.PathTransformFunc(fileKey)
+	fullPath := filepath.Join(s.Root, fileID, contentAddressPath.FullPath())
 
-var DefaultPathTransformFunc = func(key string) PathKey {
-	return PathKey{
-		PathName: key,
-		Filename: key,
-	}
-}
-
-type Store struct {
-	StoreOpts
-}
-
-func NewStore(opts StoreOpts) *Store {
-	if opts.PathTransformFunc == nil {
-		opts.PathTransformFunc = DefaultPathTransformFunc
-	}
-	if len(opts.Root) == 0 {
-		opts.Root = defaultRootFolderName
-	}
-
-	return &Store{
-		StoreOpts: opts,
-	}
-}
-
-// Check if a file exists at the specified path
-func (s *Store) Has(id string, key string) bool {
-	pathKey := s.PathTransformFunc(key)
-	fullPathWithRoot := filepath.Join(s.Root, id, pathKey.FullPath())
-
-	_, err := os.Stat(fullPathWithRoot)
+	_, err := os.Stat(fullPath)
 	return !errors.Is(err, os.ErrNotExist)
 }
 
-// Remove all files in the root directory
+// Clear removes all files in the root directory.
 func (s *Store) Clear() error {
-	return os.RemoveAll(s.Root)
+	err := os.RemoveAll(s.Root)
+	if err != nil {
+		return fmt.Errorf("failed to clear the store: %w", err)
+	}
+	return nil
 }
 
-// Delete a specific file from the store
-func (s *Store) Delete(id string, key string) error {
+// DeleteFile removes a specific file from the store.
+func (s *Store) DeleteFile(fileID, key string) error {
 	pathKey := s.PathTransformFunc(key)
+	firstPathWithRoot := filepath.Join(s.Root, fileID, pathKey.FirstPathName())
 
-	defer func() {
-		log.Printf("deleted [%s] from disk", pathKey.Filename)
-	}()
+	err := os.RemoveAll(firstPathWithRoot)
+	if err != nil {
+		return fmt.Errorf("failed to delete file: %w", err)
+	}
 
-	firstPathNameWithRoot := filepath.Join(s.Root, id, pathKey.FirstPathName())
-	return os.RemoveAll(firstPathNameWithRoot)
+	log.Printf("deleted [%s] from disk", pathKey.Filename)
+	return nil
 }
 
-// Write data to a file
-func (s *Store) Write(id string, key string, r io.Reader) (int64, error) {
-	return s.writeStream(id, key, r)
+// WriteFile writes data to a file.
+func (s *Store) WriteFile(fileID, key string, dataReader io.Reader) (int64, error) {
+	return s.writeToFile(fileID, key, dataReader)
 }
 
-// Write and decrypt data to a file
-func (s *Store) WriteDecrypt(encKey []byte, id string, key string, r io.Reader) (int64, error) {
-	f, err := s.openFileForWriting(id, key)
+// WriteAndDecryptFile writes and decrypts data to a file.
+func (s *Store) WriteAndDecryptFile(encryptionKey []byte, fileID, key string, dataReader io.Reader) (int64, error) {
+	file, err := s.openFileForWriting(fileID, key)
 	if err != nil {
 		return 0, err
 	}
-	n, err := copyDecrypt(encKey, r, f)
-	return int64(n), err
-}
+	defer file.Close()
 
-func (s *Store) openFileForWriting(id string, key string) (*os.File, error) {
-	pathKey := s.PathTransformFunc(key)
-	pathNameWithRoot := filepath.Join(s.Root, id, pathKey.PathName)
-	if err := os.MkdirAll(pathNameWithRoot, os.ModePerm); err != nil {
-		return nil, err
+	bytesWritten, err := copyAndDecrypt(encryptionKey, dataReader, file)
+	if err != nil {
+		return 0, fmt.Errorf("failed to write and decrypt file: %w", err)
 	}
 
-	fullPathWithRoot := filepath.Join(s.Root, id, pathKey.FullPath())
-	return os.Create(fullPathWithRoot)
+	return int64(bytesWritten), nil
 }
 
-func (s *Store) writeStream(id string, key string, r io.Reader) (int64, error) {
-	f, err := s.openFileForWriting(id, key)
+// openFileForWriting creates the necessary directories and opens a file for writing.
+func (s *Store) openFileForWriting(fileID, key string) (*os.File, error) {
+	pathKey := s.PathTransformFunc(key)
+	dirPath := filepath.Join(s.Root, fileID, pathKey.PathName)
+
+	if err := os.MkdirAll(dirPath, os.ModePerm); err != nil {
+		return nil, fmt.Errorf("failed to create directories: %w", err)
+	}
+
+	fullFilePath := filepath.Join(s.Root, fileID, pathKey.FullPath())
+	file, err := os.Create(fullFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file: %w", err)
+	}
+
+	return file, nil
+}
+
+// writeToFile writes data to a file.
+func (s *Store) writeToFile(fileID, key string, dataReader io.Reader) (int64, error) {
+	file, err := s.openFileForWriting(fileID, key)
 	if err != nil {
 		return 0, err
 	}
-	return io.Copy(f, r)
+	defer file.Close()
+
+	bytesWritten, err := io.Copy(file, dataReader)
+	if err != nil {
+		return 0, fmt.Errorf("failed to write to file: %w", err)
+	}
+
+	return bytesWritten, nil
 }
 
-func (s *Store) Read(id string, key string) (int64, io.Reader, error) {
-	return s.readStream(id, key)
+// ReadFile reads data from a file.
+func (s *Store) ReadFile(fileID, key string) (int64, io.Reader, error) {
+	return s.readFromFile(fileID, key)
 }
 
-func (s *Store) readStream(id string, key string) (int64, io.ReadCloser, error) {
+// readFromFile reads data from a file.
+func (s *Store) readFromFile(fileID, key string) (int64, io.ReadCloser, error) {
 	pathKey := s.PathTransformFunc(key)
-	fullPathWithRoot := filepath.Join(s.Root, id, pathKey.FullPath())
+	fullFilePath := filepath.Join(s.Root, fileID, pathKey.FullPath())
 
-	file, err := os.Open(fullPathWithRoot)
+	file, err := os.Open(fullFilePath)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("failed to open file: %w", err)
 	}
 
-	fi, err := file.Stat()
+	fileInfo, err := file.Stat()
 	if err != nil {
-		return 0, nil, err
+		file.Close()
+		return 0, nil, fmt.Errorf("failed to get file info: %w", err)
 	}
 
-	return fi.Size(), file, nil
+	return fileInfo.Size(), file, nil
 }
