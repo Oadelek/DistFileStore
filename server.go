@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Oadeleke/DistFileStore/p2p"
+	"github.com/Oadelek/DistFileStore/p2p"
 )
 
 type FileServerOpts struct {
