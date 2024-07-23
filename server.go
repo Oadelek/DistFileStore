@@ -1,6 +1,7 @@
 package main
 
 import (
+	"DistFileStore/p2p"
 	"bytes"
 	"encoding/binary"
 	"encoding/gob"
@@ -9,8 +10,6 @@ import (
 	"log"
 	"sync"
 	"time"
-
-	"github.com/Oadelek/DistFileStore/p2p"
 )
 
 type FileServerOpts struct {

@@ -1,13 +1,13 @@
 package main
 
 import (
+	"DistFileStore/p2p"
 	"bytes"
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"time"
-
-	"github.com/Oadelek/DistFileStore/p2p"
 )
 
 func makeServer(listenAddr string, nodes ...string) *FileServer {
@@ -17,11 +17,12 @@ func makeServer(listenAddr string, nodes ...string) *FileServer {
 		Decoder:       p2p.DefaultDecoder{},
 	}
 	tcpTransport := p2p.NewTCPTransport(tcptransportOpts)
+	// Replace colon in the storage root directory name
+	storageRoot := strings.Replace(listenAddr, ":", "", -1) + "_network"
 
 	fileServerOpts := FileServerOpts{
-		EncKey: newEncryptionKey(),
-		//StorageRoot: "C:/Projects/DistFileStore",
-		StorageRoot:       listenAddr + "_network",
+		EncKey:            newEncryptionKey(),
+		StorageRoot:       storageRoot,
 		PathTransformFunc: CASPathTransformFunc,
 		Transport:         tcpTransport,
 		BootstrapNodes:    nodes,
